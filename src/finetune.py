@@ -6,8 +6,13 @@ from sklearn.model_selection import train_test_split
 import pandas as pd
 
 def main():
-    model_name = "mistral-small"  # or "gemma-small"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # Load the Mistral model
+    model_name = "mistralai/Mistral-7B-Instruct-v0.1"
+    # Use the off-the-shelf Mistral tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(
+    model_name,
+    use_auth_token=True
+    )
     base_model = AutoModelForSequenceClassification.from_pretrained(
         model_name, num_labels=3
     )
@@ -21,7 +26,7 @@ def main():
     model = get_peft_model(base_model, peft_config)
 
      # Load CSV, then split
-    df = pd.read_csv("data/financial_phrasebank.csv")
+    df = pd.read_csv("data/data.csv")
     train_df, val_df = train_test_split(df, test_size=0.1, random_state=42)
     train_ds = FinancialPhraseBank(train_df, tokenizer)
     val_ds   = FinancialPhraseBank(val_df,   tokenizer)
