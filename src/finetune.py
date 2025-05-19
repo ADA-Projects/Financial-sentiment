@@ -3,6 +3,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trai
 from peft import get_peft_config, get_peft_model, LoraConfig, TaskType
 from dataset import FinancialPhraseBank
 from sklearn.model_selection import train_test_split
+import pandas as pd
 
 def main():
     model_name = "mistral-small"  # or "gemma-small"
@@ -19,10 +20,11 @@ def main():
     )
     model = get_peft_model(base_model, peft_config)
 
-    # Load and split data
-    train_df, val_df = train_test_split("data/financial_phrasebank.csv", test_size=0.1, random_state=42)
+     # Load CSV, then split
+    df = pd.read_csv("data/financial_phrasebank.csv")
+    train_df, val_df = train_test_split(df, test_size=0.1, random_state=42)
     train_ds = FinancialPhraseBank(train_df, tokenizer)
-    val_ds = FinancialPhraseBank(val_df, tokenizer)
+    val_ds   = FinancialPhraseBank(val_df,   tokenizer)
 
     # Training args
     args = TrainingArguments(

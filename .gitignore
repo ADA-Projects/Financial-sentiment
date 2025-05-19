@@ -1,0 +1,26 @@
+# Hugging Face credentials
+.cache/
+**/huggingface/token
+**/huggingface/stored_tokens
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+*.egg-info/
+
+# Virtual Environment
+finsen-env/
+.env
+
+# Kaggle credentials
+.kaggle/
+kaggle.json
+
+# IDE
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
