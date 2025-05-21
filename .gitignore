@@ -13,6 +13,9 @@ __pycache__/
 # Virtual Environment
 finsen-env/
 .env
+.venv/
+venv/
+env/
 
 # Kaggle credentials
 .kaggle/
