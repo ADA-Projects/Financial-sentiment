@@ -9,15 +9,17 @@ class FinancialPhraseBank(Dataset):
         data (str or pandas.DataFrame): Path to CSV file or DataFrame with columns 'Sentence' and 'Sentiment'.
         tokenizer: HuggingFace tokenizer instance.
         max_length (int): Max token length for truncation/padding.
+        label2id (dict, optional): Mapping from string labels to integer IDs. If not provided, one will be built from the data.
 
     Behavior:
         - Reads CSV if `data` is a file path; clones DataFrame if passed directly.
         - Validates required columns.
-        - Converts string labels to integer IDs via an internal mapping.
+        - Uses `label2id` if given; otherwise builds a sorted-label mapping.
+        - Stores `id2label` inverse mapping for inference.
         - Tokenizes on-the-fly in __getitem__ with padding/truncation.
     """
-    def __init__(self, data, tokenizer, max_length: int = 128):
-        # Load data
+    def __init__(self, data, tokenizer, max_length: int = 128, label2id: dict = None):
+        # Load DataFrame
         if isinstance(data, str):
             df = pd.read_csv(data)
         elif isinstance(data, pd.DataFrame):
@@ -25,24 +27,30 @@ class FinancialPhraseBank(Dataset):
         else:
             raise ValueError("`data` must be a file path or pandas DataFrame")
 
-        # Ensure necessary columns
+        # Validate columns
         if not {'Sentence', 'Sentiment'}.issubset(df.columns):
             raise ValueError("DataFrame must contain 'Sentence' and 'Sentiment' columns")
 
-        # Prepare texts
+        # Store text
         self.texts = df['Sentence'].astype(str).tolist()
 
-        # Prepare labels, mapping strings to ints if needed
+        # Label mapping
         raw_labels = df['Sentiment']
-        if raw_labels.dtype == object or isinstance(raw_labels.iloc[0], str):
-            unique_vals = sorted(raw_labels.unique())
-            self.label_map = {label: idx for idx, label in enumerate(unique_vals)}
-            labels_mapped = raw_labels.map(self.label_map)
+        if label2id is not None:
+            self.label2id = label2id
+            self.id2label = {v: k for k, v in label2id.items()}
+            labels_mapped = raw_labels.map(self.label2id)
         else:
-            self.label_map = None
-            labels_mapped = raw_labels
+            # Build mapping from sorted unique string labels
+            unique = sorted(raw_labels.unique())
+            self.label2id = {l: i for i, l in enumerate(unique)}
+            self.id2label = {i: l for l, i in self.label2id.items()}
+            labels_mapped = raw_labels.map(self.label2id)
 
+        # Final labels
         self.labels = labels_mapped.astype(int).tolist()
+
+        # Tokenizer and length
         self.tokenizer = tokenizer
         self.max_length = max_length
 
@@ -59,8 +67,9 @@ class FinancialPhraseBank(Dataset):
             truncation=True,
             return_tensors='pt'
         )
-        # Remove batch dimension
+        # Squeeze batch dim
         item = {k: v.squeeze(0) for k, v in encoding.items()}
         item['labels'] = label
         return item
+
 
