@@ -1,0 +1,24 @@
+{
+  "name": "Python Sentiment (slim)",
+  // Use the official lightweight Python image
+  "image": "mcr.microsoft.com/vscode/devcontainers/python:3.10-bullseye",
+
+  // Mount your workspace
+  "workspaceFolder": "/workspaces/Financial-sentiment",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/Financial-sentiment,type=bind",
+
+  // Install your Linux packages and Python deps in the build image
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:1": {}  
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-toolsai.jupyter"
+      ]
+    }
+  },
+
+  "postCreateCommand": "cd /workspaces/Financial-sentiment && python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt"
+}
