@@ -27,3 +27,8 @@ kaggle.json
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Checkpoint files
+outputs/
+toy-outputs/
+toy-logs/
