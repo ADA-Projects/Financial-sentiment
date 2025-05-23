@@ -36,3 +36,6 @@ notebooks/toy-logs/
 *.pt
 *.bin
 *.pth
+
+# ignore temporary archives
+*.tar.gz
