@@ -21,3 +21,4 @@ nbstripout>=0.6.1
 
 # ML Optimization
 optuna>=3.5.0
+joblib>=1.2.0

@@ -39,3 +39,6 @@ notebooks/toy-logs/
 
 # ignore temporary archives
 *.tar.gz
+cache/
+cache_dir/
+*.npy
