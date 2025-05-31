@@ -1,0 +1,12 @@
+{
+  "data_path": "data/data.csv",
+  "output_dir": "outputs",
+  "model_name": "climatebert/econbert",
+  "max_length": 128,
+  "batch_size": 16,
+  "test_size": 0.2,
+  "cv_folds": 3,
+  "random_state": 42,
+  "save_model_weights": false,
+  "save_embeddings_cache": false
+}

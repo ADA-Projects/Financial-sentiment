@@ -1,7 +1,11 @@
-# Hugging Face credentials
+# Credentials and Environment
+.env
 .cache/
 **/huggingface/token
 **/huggingface/stored_tokens
+~/.cache/huggingface/
+.kaggle/
+kaggle.json
 
 # Python
 __pycache__/
@@ -12,14 +16,9 @@ __pycache__/
 
 # Virtual Environment
 finsen-env/
-.env
 .venv/
 venv/
 env/
-
-# Kaggle credentials
-.kaggle/
-kaggle.json
 
 # IDE
 .vscode/
@@ -28,17 +27,24 @@ kaggle.json
 # Jupyter
 .ipynb_checkpoints/
 
-# Model checkpoints and outputs
-notebooks/outputs/
-notebooks/toy-outputs/
-notebooks/toy-logs/
+# Model Files and Checkpoints
 *.safetensors
 *.pt
 *.bin
 *.pth
+checkpoint-*/
+model_*/
+tokenizer_*/
 
-# ignore temporary archives
-*.tar.gz
+# Output and Cache Directories
+notebooks/outputs/
+notebooks/toy-outputs/
+notebooks/toy-logs/
+outputs/
 cache/
 cache_dir/
+temp/
+
+# Temporary and Binary Files
+*.tar.gz
 *.npy
