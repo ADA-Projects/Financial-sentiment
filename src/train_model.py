@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Final training script for Financial Sentiment Analysis
-Combines EconBERT embeddings with handcrafted features
+EconBERT-Only training script for Financial Sentiment Analysis
+No handcrafted features - just pure EconBERT embeddings
 """
 
 import pandas as pd
@@ -17,7 +17,6 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, f1_score
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from huggingface_hub import snapshot_download
-import re
 from tqdm.auto import tqdm
 import logging
 
@@ -25,14 +24,14 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class FinancialSentimentTrainer:
+class EconBERTOnlyTrainer:
     def __init__(self, config_path="config.json"):
         """Initialize trainer with configuration"""
         self.config = self.load_config(config_path)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_cls = None
         self.tokenizer = None
-        self.hybrid_pipeline = None
+        self.pipeline = None
         
     def load_config(self, config_path):
         """Load training configuration"""
@@ -140,50 +139,25 @@ class FinancialSentimentTrainer:
                 hidden_states = outputs.hidden_states[-1]  # Last layer
                 cls_embeddings = hidden_states[:, 0, :].cpu().numpy()  # CLS token
                 embeddings.append(cls_embeddings)
+            
+            # Clear GPU memory after each batch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         return np.vstack(embeddings)
     
-    def compute_handcrafted_features(self, sentences):
-        """Compute handcrafted financial features"""
-        features = []
-        
-        for sentence in sentences:
-            # Text statistics
-            len_chars = len(sentence)
-            len_words = len(sentence.split())
-            
-            # Financial indicators
-            pct_digits = len(re.findall(r'\d', sentence)) / (len(sentence) + 1)
-            count_tickers = len(re.findall(r'\$[A-Z]{1,5}', sentence))
-            has_profit = int('profit' in sentence.lower())
-            has_loss = int('loss' in sentence.lower())
-            
-            # Punctuation and sentiment indicators
-            exclamation_count = sentence.count('!')
-            question_count = sentence.count('?')
-            percent_signs = sentence.count('%')
-            
-            features.append([
-                len_chars, len_words, pct_digits, count_tickers,
-                has_profit, has_loss, exclamation_count, 
-                question_count, percent_signs
-            ])
-        
-        return np.array(features)
-    
-    def train_hybrid_model(self, df):
-        """Train the hybrid model (embeddings + features)"""
-        logger.info("Training hybrid model...")
+    def train_econbert_only(self, df):
+        """Train using ONLY EconBERT embeddings"""
+        logger.info("Training EconBERT-only model...")
         
         sentences = df['Sentence'].tolist()
         labels = df['Sentiment'].map(self.config["label_mapping"]).values
         
-        # Extract embeddings and features
+        # Extract ONLY embeddings (no handcrafted features)
         embeddings = self.extract_embeddings(sentences)
-        features = self.compute_handcrafted_features(sentences)
         
-        # Combine features
-        X = np.concatenate([embeddings, features], axis=1)
+        # Use embeddings directly
+        X = embeddings  # Shape: (n_samples, 768)
         
         # Train/test split
         X_train, X_test, y_train, y_test = train_test_split(
@@ -193,8 +167,8 @@ class FinancialSentimentTrainer:
             random_state=self.config["random_state"]
         )
         
-        # Create pipeline
-        self.hybrid_pipeline = make_pipeline(
+        # Create pipeline with ONLY embeddings
+        self.pipeline = make_pipeline(
             StandardScaler(),
             LogisticRegression(
                 class_weight='balanced',
@@ -232,10 +206,10 @@ class FinancialSentimentTrainer:
         logger.info(f"CV macro F1: {np.mean(cv_scores):.4f} ± {np.std(cv_scores):.4f}")
         
         # Train final model on all training data
-        self.hybrid_pipeline.fit(X_train, y_train)
+        self.pipeline.fit(X_train, y_train)
         
         # Evaluate on test set
-        y_pred = self.hybrid_pipeline.predict(X_test)
+        y_pred = self.pipeline.predict(X_test)
         test_f1 = f1_score(y_test, y_pred, average='macro')
         logger.info(f"Test macro F1: {test_f1:.4f}")
         
@@ -243,7 +217,7 @@ class FinancialSentimentTrainer:
         id2label = {v: k for k, v in self.config["label_mapping"].items()}
         target_names = [id2label[i] for i in sorted(id2label.keys())]
         
-        print("\nDetailed Classification Report:")
+        print("\nEconBERT-Only Classification Report:")
         print(classification_report(y_test, y_pred, target_names=target_names))
         
         return {
@@ -253,12 +227,12 @@ class FinancialSentimentTrainer:
         }
     
     def save_model(self):
-        """Save all model components"""
+        """Save model components"""
         output_dir = Path(self.config["output_dir"])
         output_dir.mkdir(exist_ok=True)
         
-        # Save hybrid pipeline
-        joblib.dump(self.hybrid_pipeline, output_dir / "hybrid_pipeline.joblib")
+        # Save pipeline (small file)
+        joblib.dump(self.pipeline, output_dir / "econbert_only_pipeline.joblib")
         
         # Save tokenizer
         tokenizer_dir = output_dir / "tokenizer"
@@ -269,14 +243,22 @@ class FinancialSentimentTrainer:
         self.model_cls.save_pretrained(str(model_dir))
         
         # Save configuration
-        with open(output_dir / "config.json", 'w') as f:
-            json.dump(self.config, f, indent=2)
+        model_info = {
+            "config": self.config,
+            "model_name": self.config["model_name"],
+            "model_type": "econbert_only",
+            "embedding_dim": 768,
+            "total_features": 768  # Only embeddings
+        }
         
-        logger.info(f"Model saved to {output_dir}")
+        with open(output_dir / "model_info.json", 'w') as f:
+            json.dump(model_info, f, indent=2)
+        
+        logger.info(f"EconBERT-only model saved to {output_dir}")
     
     def run_training(self):
         """Main training workflow"""
-        logger.info("Starting training workflow...")
+        logger.info("Starting EconBERT-only training workflow...")
         
         # Setup model
         self.setup_econbert()
@@ -284,8 +266,8 @@ class FinancialSentimentTrainer:
         # Load and prepare data
         df = self.load_and_prepare_data()
         
-        # Train hybrid model
-        results = self.train_hybrid_model(df)
+        # Train model
+        results = self.train_econbert_only(df)
         
         # Save model
         self.save_model()
@@ -295,7 +277,7 @@ class FinancialSentimentTrainer:
 
 def main():
     """Main function"""
-    trainer = FinancialSentimentTrainer()
+    trainer = EconBERTOnlyTrainer()
     results = trainer.run_training()
     print(f"\nFinal Results: {results}")
 

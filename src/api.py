@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FastAPI for Financial Sentiment Analysis
+EconBERT-Only API for Financial Sentiment Analysis
 """
 
 from fastapi import FastAPI, HTTPException
@@ -10,7 +10,6 @@ import numpy as np
 import torch
 import joblib
 import json
-import re
 from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import logging
@@ -19,26 +18,27 @@ from contextlib import asynccontextmanager
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class ModelManager:
-    """Manages model loading and inference"""
+class EconBERTOnlyManager:
+    """Manages EconBERT-only model loading and inference"""
     
     def __init__(self, model_dir: str = "outputs"):
         self.model_dir = Path(model_dir)
         self.tokenizer = None
         self.model_cls = None
-        self.hybrid_pipeline = None
+        self.pipeline = None
         self.config = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
     def load_models(self):
         """Load all model components"""
-        logger.info("Loading models...")
+        logger.info("Loading EconBERT-only models...")
         
         # Load configuration
-        config_path = self.model_dir / "config.json"
+        config_path = self.model_dir / "model_info.json"
         if config_path.exists():
             with open(config_path, 'r') as f:
-                self.config = json.load(f)
+                model_info = json.load(f)
+                self.config = model_info.get("config", {})
         else:
             # Default config
             self.config = {
@@ -65,10 +65,23 @@ class ModelManager:
         self.model_cls.eval()
         self.model_cls.to(self.device)
         
-        # Load hybrid pipeline
-        self.hybrid_pipeline = joblib.load(self.model_dir / "hybrid_pipeline.joblib")
+        # Load pipeline (should be econbert_only_pipeline.joblib)
+        pipeline_files = [
+            "econbert_only_pipeline.joblib",  # New name
+            "hybrid_pipeline.joblib"          # Fallback to old name
+        ]
         
-        logger.info("Models loaded successfully")
+        for filename in pipeline_files:
+            pipeline_path = self.model_dir / filename
+            if pipeline_path.exists():
+                self.pipeline = joblib.load(pipeline_path)
+                logger.info(f"Loaded pipeline from {filename}")
+                break
+        
+        if self.pipeline is None:
+            raise FileNotFoundError("No pipeline found in outputs directory")
+        
+        logger.info("EconBERT-only models loaded successfully")
     
     def extract_embeddings(self, sentences: List[str], batch_size: int = 32) -> np.ndarray:
         """Extract embeddings from sentences"""
@@ -93,44 +106,23 @@ class ModelManager:
         
         return np.vstack(embeddings)
     
-    def compute_features(self, sentences: List[str]) -> np.ndarray:
-        """Compute handcrafted features"""
-        features = []
-        
-        for sentence in sentences:
-            len_chars = len(sentence)
-            len_words = len(sentence.split())
-            pct_digits = len(re.findall(r'\d', sentence)) / (len(sentence) + 1)
-            count_tickers = len(re.findall(r'\$[A-Z]{1,5}', sentence))
-            has_profit = int('profit' in sentence.lower())
-            has_loss = int('loss' in sentence.lower())
-            exclamation_count = sentence.count('!')
-            question_count = sentence.count('?')
-            percent_signs = sentence.count('%')
-            
-            features.append([
-                len_chars, len_words, pct_digits, count_tickers,
-                has_profit, has_loss, exclamation_count,
-                question_count, percent_signs
-            ])
-        
-        return np.array(features)
-    
     def predict(self, sentences: List[str]) -> List[Dict]:
-        """Make predictions on sentences"""
+        """Make predictions using ONLY EconBERT embeddings"""
         if not sentences:
             return []
         
-        # Extract embeddings and features
-        embeddings = self.extract_embeddings(sentences)
-        features = self.compute_features(sentences)
+        if self.pipeline is None:
+            raise RuntimeError("Pipeline not loaded")
         
-        # Combine features
-        X = np.concatenate([embeddings, features], axis=1)
+        # Extract ONLY embeddings (no handcrafted features)
+        embeddings = self.extract_embeddings(sentences)
+        
+        # Use embeddings directly (no concatenation)
+        X = embeddings  # Shape: (n_sentences, 768)
         
         # Get predictions and probabilities
-        predictions = self.hybrid_pipeline.predict(X)
-        probabilities = self.hybrid_pipeline.predict_proba(X)
+        predictions = self.pipeline.predict(X)
+        probabilities = self.pipeline.predict_proba(X)
         
         # Convert to readable format
         id2label = {v: k for k, v in self.config["label_mapping"].items()}
@@ -151,7 +143,7 @@ class ModelManager:
         return results
 
 # Global model manager
-model_manager = ModelManager()
+model_manager = EconBERTOnlyManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -164,19 +156,18 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app
 app = FastAPI(
-    title="Financial Sentiment Analysis API",
-    description="API for analyzing sentiment in financial text using EconBERT",
-    version="1.0.0",
+    title="Financial Sentiment Analysis API (EconBERT-Only)",
+    description="API using pure EconBERT embeddings for financial sentiment analysis",
+    version="2.0.0",
     lifespan=lifespan
 )
 
 # Request/Response models
 class SentimentRequest(BaseModel):
-    sentences: List[str] = Field(..., min_items=1, max_items=100, 
-                                description="List of sentences to analyze (max 100)")
+    sentences: List[str] = Field(..., min_items=1, max_items=100)
 
 class SingleSentimentRequest(BaseModel):
-    sentence: str = Field(..., min_length=1, max_length=500, description="Sentence to analyze")
+    sentence: str = Field(..., min_length=1, max_length=500)
     
 class SentimentResponse(BaseModel):
     sentence: str
@@ -188,20 +179,16 @@ class BatchSentimentResponse(BaseModel):
     results: List[SentimentResponse]
     processing_time_ms: float
 
-class HealthResponse(BaseModel):
-    status: str
-    model_loaded: bool
-    version: str
-
 # API Endpoints
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return HealthResponse(
-        status="healthy",
-        model_loaded=model_manager.hybrid_pipeline is not None,
-        version="1.0.0"
-    )
+    return {
+        "status": "healthy",
+        "model_loaded": model_manager.pipeline is not None,
+        "version": "2.0.0",
+        "model_type": "econbert_only"
+    }
 
 @app.post("/predict", response_model=BatchSentimentResponse)
 async def predict_sentiment(request: SentimentRequest):
@@ -211,7 +198,7 @@ async def predict_sentiment(request: SentimentRequest):
     start_time = time.time()
     
     try:
-        if model_manager.hybrid_pipeline is None:
+        if model_manager.pipeline is None:
             raise HTTPException(status_code=503, detail="Models not loaded")
         
         # Make predictions
@@ -232,7 +219,7 @@ async def predict_sentiment(request: SentimentRequest):
 async def predict_single_sentiment(request: SingleSentimentRequest):
     """Predict sentiment for a single sentence"""
     try:
-        if model_manager.hybrid_pipeline is None:
+        if model_manager.pipeline is None:
             raise HTTPException(status_code=503, detail="Models not loaded")
         
         results = model_manager.predict([request.sentence])
@@ -245,27 +232,25 @@ async def predict_single_sentiment(request: SingleSentimentRequest):
 @app.get("/model/info")
 async def model_info():
     """Get model information"""
-    if model_manager.config is None:
-        raise HTTPException(status_code=503, detail="Models not loaded")
-    
     return {
-        "model_type": "EconBERT + Handcrafted Features",
+        "model_type": "EconBERT-Only (No Handcrafted Features)",
         "labels": list(model_manager.config["label_mapping"].keys()),
         "max_sequence_length": model_manager.config.get("max_length", 128),
-        "device": str(model_manager.device)
+        "device": str(model_manager.device),
+        "embedding_dim": 768,
+        "features": "Pure EconBERT embeddings only"
     }
 
-# Example usage endpoint
 @app.get("/examples")
 async def get_examples():
     """Get example sentences for testing"""
     return {
         "examples": [
             "Company X reported quarterly profit up 20%.",
-            "Analyst warns of potential recession next year.",
-            "The board decided to maintain current dividend policy.",
+            "Market crash threatens investor portfolios.",
             "Stock prices fell sharply after earnings miss.",
-            "Investment in new technology shows promising returns."
+            "Fed raises interest rates causing market volatility.",
+            "The board decided to maintain current dividend policy."
         ]
     }
 
