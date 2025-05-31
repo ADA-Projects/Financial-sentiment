@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Lightweight FastAPI for Financial Sentiment Analysis
-Downloads model on-demand to save space
+FastAPI for Financial Sentiment Analysis
 """
 
 from fastapi import FastAPI, HTTPException
@@ -14,144 +13,85 @@ import json
 import re
 from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from huggingface_hub import snapshot_download
 import logging
-import tempfile
-import shutil
+from contextlib import asynccontextmanager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class LightweightModelManager:
-    """Manages model loading with minimal disk usage"""
+class ModelManager:
+    """Manages model loading and inference"""
     
     def __init__(self, model_dir: str = "outputs"):
         self.model_dir = Path(model_dir)
         self.tokenizer = None
         self.model_cls = None
         self.hybrid_pipeline = None
-        self.model_info = None
+        self.config = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._temp_model_dir = None
         
-    def load_pipeline_only(self):
-        """Load only the trained pipeline (small file)"""
-        logger.info("Loading hybrid pipeline...")
+    def load_models(self):
+        """Load all model components"""
+        logger.info("Loading models...")
         
-        # Load pipeline (this is small - few MB)
-        pipeline_path = self.model_dir / "hybrid_pipeline.joblib"
-        if pipeline_path.exists():
-            self.hybrid_pipeline = joblib.load(pipeline_path)
-            logger.info("Pipeline loaded")
+        # Load configuration
+        config_path = self.model_dir / "config.json"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                self.config = json.load(f)
         else:
-            raise FileNotFoundError("No trained pipeline found. Run training first.")
-        
-        # Load model info
-        info_path = self.model_dir / "model_info.json"
-        if info_path.exists():
-            with open(info_path, 'r') as f:
-                self.model_info = json.load(f)
-        else:
-            # Default config if file doesn't exist
-            self.model_info = {
-                "model_name": "climatebert/econbert",
-                "embedding_dim": 768,
-                "feature_names": [
-                    "len_chars", "len_words", "pct_digits", "count_tickers",
-                    "has_profit", "has_loss", "exclamation_count", 
-                    "question_count", "percent_signs"
-                ]
+            # Default config
+            self.config = {
+                "label_mapping": {"negative": 0, "neutral": 1, "positive": 2},
+                "max_length": 128
             }
-    
-    def load_econbert_on_demand(self):
-        """Load EconBERT only when needed (downloads fresh each time)"""
-        if self.tokenizer is not None and self.model_cls is not None:
-            return  # Already loaded
-            
-        logger.info("Loading EconBERT on-demand...")
         
-        try:
-            # Use temporary directory
-            self._temp_model_dir = tempfile.mkdtemp()
-            
-            # Download to temp directory
-            repo_local = snapshot_download(
-                repo_id=self.model_info["model_name"],
-                repo_type="model",
-                cache_dir=self._temp_model_dir
-            )
-            
-            # Load tokenizer
-            tokenizer_path = Path(repo_local) / "EconBERT_Model" / "econbert_tokenizer"
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                str(tokenizer_path),
-                use_fast=True,
-                trust_remote_code=True
-            )
-            
-            # Load model
-            model_path = Path(repo_local) / "EconBERT_Model" / "econbert_weights"
-            self.model_cls = AutoModelForSequenceClassification.from_pretrained(
-                str(model_path),
-                trust_remote_code=True,
-                torch_dtype=torch.float16,
-                device_map="auto"
-            )
-            self.model_cls.eval()
-            self.model_cls.to(self.device)
-            
-            logger.info("EconBERT loaded successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to load EconBERT: {e}")
-            raise
-    
-    def cleanup_temp_files(self):
-        """Clean up temporary model files"""
-        if self._temp_model_dir and Path(self._temp_model_dir).exists():
-            shutil.rmtree(self._temp_model_dir)
-            logger.info("Cleaned up temporary model files")
+        # Load tokenizer
+        tokenizer_path = self.model_dir / "tokenizer"
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            str(tokenizer_path),
+            use_fast=True,
+            trust_remote_code=True
+        )
         
-        # Clear CUDA cache
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    
-    def extract_embeddings(self, sentences: List[str], batch_size: int = 16) -> np.ndarray:
-        """Extract embeddings with automatic cleanup"""
-        # Load model if not already loaded
-        self.load_econbert_on_demand()
+        # Load EconBERT model
+        model_path = self.model_dir / "econbert_model"
+        self.model_cls = AutoModelForSequenceClassification.from_pretrained(
+            str(model_path),
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
+        self.model_cls.eval()
+        self.model_cls.to(self.device)
         
+        # Load hybrid pipeline
+        self.hybrid_pipeline = joblib.load(self.model_dir / "hybrid_pipeline.joblib")
+        
+        logger.info("Models loaded successfully")
+    
+    def extract_embeddings(self, sentences: List[str], batch_size: int = 32) -> np.ndarray:
+        """Extract embeddings from sentences"""
         embeddings = []
         
-        try:
-            for i in range(0, len(sentences), batch_size):
-                batch = sentences[i:i+batch_size]
-                
-                inputs = self.tokenizer(
-                    batch,
-                    return_tensors="pt",
-                    padding="longest", 
-                    truncation=True,
-                    max_length=128
-                ).to(self.device)
-                
-                with torch.no_grad():
-                    outputs = self.model_cls(**inputs, output_hidden_states=True)
-                    hidden_states = outputs.hidden_states[-1]
-                    cls_embeddings = hidden_states[:, 0, :].cpu().numpy()
-                    embeddings.append(cls_embeddings)
-                
-                # Clear memory after each batch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+        for i in range(0, len(sentences), batch_size):
+            batch = sentences[i:i+batch_size]
             
-            return np.vstack(embeddings)
+            inputs = self.tokenizer(
+                batch,
+                return_tensors="pt",
+                padding="longest", 
+                truncation=True,
+                max_length=self.config.get("max_length", 128)
+            ).to(self.device)
             
-        finally:
-            # Always cleanup after extraction
-            self.cleanup_temp_files()
-            self.tokenizer = None
-            self.model_cls = None
+            with torch.no_grad():
+                outputs = self.model_cls(**inputs, output_hidden_states=True)
+                hidden_states = outputs.hidden_states[-1]
+                cls_embeddings = hidden_states[:, 0, :].cpu().numpy()
+                embeddings.append(cls_embeddings)
+        
+        return np.vstack(embeddings)
     
     def compute_features(self, sentences: List[str]) -> np.ndarray:
         """Compute handcrafted features"""
@@ -177,12 +117,9 @@ class LightweightModelManager:
         return np.array(features)
     
     def predict(self, sentences: List[str]) -> List[Dict]:
-        """Make predictions"""
+        """Make predictions on sentences"""
         if not sentences:
             return []
-        
-        if self.hybrid_pipeline is None:
-            raise RuntimeError("Pipeline not loaded. Call load_pipeline_only() first.")
         
         # Extract embeddings and features
         embeddings = self.extract_embeddings(sentences)
@@ -196,9 +133,7 @@ class LightweightModelManager:
         probabilities = self.hybrid_pipeline.predict_proba(X)
         
         # Convert to readable format
-        label_mapping = self.model_info.get("config", {}).get("label_mapping", 
-                                                              {"negative": 0, "neutral": 1, "positive": 2})
-        id2label = {v: k for k, v in label_mapping.items()}
+        id2label = {v: k for k, v in self.config["label_mapping"].items()}
         
         results = []
         for i, (pred, probs) in enumerate(zip(predictions, probabilities)):
@@ -216,67 +151,92 @@ class LightweightModelManager:
         return results
 
 # Global model manager
-model_manager = LightweightModelManager()
+model_manager = ModelManager()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan"""
+    # Startup
+    model_manager.load_models()
+    yield
+    # Shutdown
+    logger.info("Shutting down...")
 
 # Create FastAPI app
 app = FastAPI(
-    title="Financial Sentiment Analysis API (Lightweight)",
-    description="Space-efficient API for financial sentiment analysis",
-    version="1.0.0"
+    title="Financial Sentiment Analysis API",
+    description="API for analyzing sentiment in financial text using EconBERT",
+    version="1.0.0",
+    lifespan=lifespan
 )
-
-# Load only the pipeline on startup
-@app.on_event("startup")
-async def startup_event():
-    model_manager.load_pipeline_only()
 
 # Request/Response models
 class SentimentRequest(BaseModel):
-    sentences: List[str] = Field(..., min_items=1, max_items=50)  # Reduced max for memory
+    sentences: List[str] = Field(..., min_items=1, max_items=100, 
+                                description="List of sentences to analyze (max 100)")
 
+class SingleSentimentRequest(BaseModel):
+    sentence: str = Field(..., min_length=1, max_length=500, description="Sentence to analyze")
+    
 class SentimentResponse(BaseModel):
     sentence: str
     predicted_sentiment: str
     confidence: float
     probabilities: Dict[str, float]
 
+class BatchSentimentResponse(BaseModel):
+    results: List[SentimentResponse]
+    processing_time_ms: float
+
+class HealthResponse(BaseModel):
+    status: str
+    model_loaded: bool
+    version: str
+
 # API Endpoints
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "pipeline_loaded": model_manager.hybrid_pipeline is not None,
-        "version": "1.0.0",
-        "mode": "lightweight"
-    }
+    return HealthResponse(
+        status="healthy",
+        model_loaded=model_manager.hybrid_pipeline is not None,
+        version="1.0.0"
+    )
 
-@app.post("/predict")
+@app.post("/predict", response_model=BatchSentimentResponse)
 async def predict_sentiment(request: SentimentRequest):
-    """Predict sentiment for sentences"""
+    """Predict sentiment for a list of sentences"""
     import time
+    
     start_time = time.time()
     
     try:
+        if model_manager.hybrid_pipeline is None:
+            raise HTTPException(status_code=503, detail="Models not loaded")
+        
+        # Make predictions
         results = model_manager.predict(request.sentences)
+        
         processing_time = (time.time() - start_time) * 1000
         
-        return {
-            "results": results,
-            "processing_time_ms": processing_time,
-            "note": "Model downloaded fresh for this request"
-        }
+        return BatchSentimentResponse(
+            results=[SentimentResponse(**result) for result in results],
+            processing_time_ms=processing_time
+        )
         
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
-@app.post("/predict/single")
-async def predict_single_sentiment(sentence: str = Field(..., min_length=1, max_length=500)):
+@app.post("/predict/single", response_model=SentimentResponse)
+async def predict_single_sentiment(request: SingleSentimentRequest):
     """Predict sentiment for a single sentence"""
     try:
-        results = model_manager.predict([sentence])
-        return results[0] if results else None
+        if model_manager.hybrid_pipeline is None:
+            raise HTTPException(status_code=503, detail="Models not loaded")
+        
+        results = model_manager.predict([request.sentence])
+        return SentimentResponse(**results[0]) if results else None
         
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
@@ -285,14 +245,28 @@ async def predict_single_sentiment(sentence: str = Field(..., min_length=1, max_
 @app.get("/model/info")
 async def model_info():
     """Get model information"""
-    if model_manager.model_info is None:
-        raise HTTPException(status_code=503, detail="Model info not loaded")
+    if model_manager.config is None:
+        raise HTTPException(status_code=503, detail="Models not loaded")
     
     return {
-        "model_type": "EconBERT + Handcrafted Features (Lightweight)",
-        "feature_names": model_manager.model_info.get("feature_names", []),
-        "embedding_dim": model_manager.model_info.get("embedding_dim", 768),
-        "note": "Model weights downloaded on-demand to save space"
+        "model_type": "EconBERT + Handcrafted Features",
+        "labels": list(model_manager.config["label_mapping"].keys()),
+        "max_sequence_length": model_manager.config.get("max_length", 128),
+        "device": str(model_manager.device)
+    }
+
+# Example usage endpoint
+@app.get("/examples")
+async def get_examples():
+    """Get example sentences for testing"""
+    return {
+        "examples": [
+            "Company X reported quarterly profit up 20%.",
+            "Analyst warns of potential recession next year.",
+            "The board decided to maintain current dividend policy.",
+            "Stock prices fell sharply after earnings miss.",
+            "Investment in new technology shows promising returns."
+        ]
     }
 
 if __name__ == "__main__":
