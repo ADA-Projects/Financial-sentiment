@@ -8,5 +8,11 @@
   "cv_folds": 3,
   "random_state": 42,
   "save_model_weights": false,
-  "save_embeddings_cache": false
+  "save_embeddings_cache": false,
+  "use_cpu_only": false,
+  "label_mapping": {
+    "negative": 0,
+    "neutral": 1,
+    "positive": 2
+  }
 }
