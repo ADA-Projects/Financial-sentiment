@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-EconBERT-Only training script for Financial Sentiment Analysis
-No handcrafted features - just pure EconBERT embeddings
+EconBERT training with class weights (NO upsampling)
+This should fix the over-duplication of negative examples
 """
 
 import pandas as pd
@@ -15,6 +15,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, f1_score
+from sklearn.utils.class_weight import compute_class_weight
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from huggingface_hub import snapshot_download
 from tqdm.auto import tqdm
@@ -24,7 +25,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class EconBERTOnlyTrainer:
+class ClassWeightTrainer:
     def __init__(self, config_path="config.json"):
         """Initialize trainer with configuration"""
         self.config = self.load_config(config_path)
@@ -44,6 +45,8 @@ class EconBERTOnlyTrainer:
             "test_size": 0.2,
             "cv_folds": 5,
             "random_state": 42,
+            "use_class_weights": True,
+            "balance_data": False,  # NEW: Don't balance by upsampling
             "label_mapping": {"negative": 0, "neutral": 1, "positive": 2}
         }
         
@@ -87,34 +90,22 @@ class EconBERTOnlyTrainer:
         logger.info("EconBERT setup complete")
     
     def load_and_prepare_data(self):
-        """Load and prepare training data"""
+        """Load data WITHOUT balancing (use original distribution)"""
         logger.info("Loading data...")
         
         df = pd.read_csv(self.config["data_path"])
         
-        # Balance the dataset (upsample minority classes)
-        label_counts = df['Sentiment'].value_counts()
-        max_count = label_counts.max()
+        # Show original distribution
+        logger.info("Original class distribution:")
+        class_counts = df['Sentiment'].value_counts()
+        for sentiment, count in class_counts.items():
+            percentage = 100 * count / len(df)
+            logger.info(f"  {sentiment}: {count} ({percentage:.1f}%)")
         
-        balanced_dfs = []
-        for label in df['Sentiment'].unique():
-            label_df = df[df['Sentiment'] == label]
-            upsampled = label_df.sample(
-                max_count, 
-                replace=True, 
-                random_state=self.config["random_state"]
-            )
-            balanced_dfs.append(upsampled)
+        # NO BALANCING - use original data as-is
+        logger.info(f"Using original dataset: {len(df)} samples (NO upsampling)")
         
-        balanced_df = pd.concat(balanced_dfs).sample(
-            frac=1, 
-            random_state=self.config["random_state"]
-        ).reset_index(drop=True)
-        
-        logger.info(f"Original dataset: {len(df)} samples")
-        logger.info(f"Balanced dataset: {len(balanced_df)} samples")
-        
-        return balanced_df
+        return df
     
     def extract_embeddings(self, sentences, batch_size=None):
         """Extract CLS embeddings from EconBERT"""
@@ -146,20 +137,38 @@ class EconBERTOnlyTrainer:
         
         return np.vstack(embeddings)
     
-    def train_econbert_only(self, df):
-        """Train using ONLY EconBERT embeddings"""
-        logger.info("Training EconBERT-only model...")
+    def compute_class_weights(self, y):
+        """Compute class weights for imbalanced data"""
+        classes = np.unique(y)
+        class_weights = compute_class_weight(
+            class_weight='balanced',
+            classes=classes,
+            y=y
+        )
+        
+        # Convert to dict format for LogisticRegression
+        class_weight_dict = {classes[i]: class_weights[i] for i in range(len(classes))}
+        
+        logger.info("Computed class weights:")
+        id2label = {v: k for k, v in self.config["label_mapping"].items()}
+        for class_id, weight in class_weight_dict.items():
+            label = id2label[class_id]
+            logger.info(f"  {label}: {weight:.3f}")
+        
+        return class_weight_dict
+    
+    def train_with_class_weights(self, df):
+        """Train using class weights (NO upsampling)"""
+        logger.info("Training with class weights (no upsampling)...")
         
         sentences = df['Sentence'].tolist()
         labels = df['Sentiment'].map(self.config["label_mapping"]).values
         
-        # Extract ONLY embeddings (no handcrafted features)
+        # Extract embeddings
         embeddings = self.extract_embeddings(sentences)
-        
-        # Use embeddings directly
         X = embeddings  # Shape: (n_samples, 768)
         
-        # Train/test split
+        # Train/test split with stratification
         X_train, X_test, y_train, y_test = train_test_split(
             X, labels,
             test_size=self.config["test_size"],
@@ -167,18 +176,21 @@ class EconBERTOnlyTrainer:
             random_state=self.config["random_state"]
         )
         
-        # Create pipeline with ONLY embeddings
+        # Compute class weights
+        class_weights = self.compute_class_weights(y_train)
+        
+        # Create pipeline with class weights
         self.pipeline = make_pipeline(
             StandardScaler(),
             LogisticRegression(
-                class_weight='balanced',
+                class_weight=class_weights,  # Use computed weights
                 max_iter=1000,
                 solver='lbfgs',
                 random_state=self.config["random_state"]
             )
         )
         
-        # Cross-validation for robust evaluation
+        # Cross-validation
         cv_scores = []
         skf = StratifiedKFold(n_splits=self.config["cv_folds"], shuffle=True, 
                              random_state=self.config["random_state"])
@@ -187,10 +199,13 @@ class EconBERTOnlyTrainer:
             X_fold_train, X_fold_val = X_train[train_idx], X_train[val_idx]
             y_fold_train, y_fold_val = y_train[train_idx], y_train[val_idx]
             
+            # Compute weights for this fold
+            fold_weights = self.compute_class_weights(y_fold_train)
+            
             fold_pipeline = make_pipeline(
                 StandardScaler(),
                 LogisticRegression(
-                    class_weight='balanced',
+                    class_weight=fold_weights,
                     max_iter=1000,
                     solver='lbfgs',
                     random_state=self.config["random_state"]
@@ -205,7 +220,7 @@ class EconBERTOnlyTrainer:
         
         logger.info(f"CV macro F1: {np.mean(cv_scores):.4f} ± {np.std(cv_scores):.4f}")
         
-        # Train final model on all training data
+        # Train final model
         self.pipeline.fit(X_train, y_train)
         
         # Evaluate on test set
@@ -217,13 +232,21 @@ class EconBERTOnlyTrainer:
         id2label = {v: k for k, v in self.config["label_mapping"].items()}
         target_names = [id2label[i] for i in sorted(id2label.keys())]
         
-        print("\nEconBERT-Only Classification Report:")
+        print("\nClass-Weighted Classification Report:")
         print(classification_report(y_test, y_pred, target_names=target_names))
+        
+        # Show class distribution in test set
+        test_dist = pd.Series(y_test).value_counts().sort_index()
+        logger.info("Test set distribution:")
+        for class_id, count in test_dist.items():
+            label = id2label[class_id]
+            logger.info(f"  {label}: {count}")
         
         return {
             'cv_scores': cv_scores,
             'test_f1': test_f1,
-            'test_report': classification_report(y_test, y_pred, target_names=target_names, output_dict=True)
+            'test_report': classification_report(y_test, y_pred, target_names=target_names, output_dict=True),
+            'class_weights': class_weights
         }
     
     def save_model(self):
@@ -231,8 +254,8 @@ class EconBERTOnlyTrainer:
         output_dir = Path(self.config["output_dir"])
         output_dir.mkdir(exist_ok=True)
         
-        # Save pipeline (small file)
-        joblib.dump(self.pipeline, output_dir / "econbert_only_pipeline.joblib")
+        # Save pipeline
+        joblib.dump(self.pipeline, output_dir / "class_weighted_pipeline.joblib")
         
         # Save tokenizer
         tokenizer_dir = output_dir / "tokenizer"
@@ -246,28 +269,29 @@ class EconBERTOnlyTrainer:
         model_info = {
             "config": self.config,
             "model_name": self.config["model_name"],
-            "model_type": "econbert_only",
+            "model_type": "econbert_class_weighted",
             "embedding_dim": 768,
-            "total_features": 768  # Only embeddings
+            "total_features": 768,
+            "training_method": "class_weights_no_upsampling"
         }
         
         with open(output_dir / "model_info.json", 'w') as f:
             json.dump(model_info, f, indent=2)
         
-        logger.info(f"EconBERT-only model saved to {output_dir}")
+        logger.info(f"Class-weighted model saved to {output_dir}")
     
     def run_training(self):
         """Main training workflow"""
-        logger.info("Starting EconBERT-only training workflow...")
+        logger.info("Starting class-weighted training workflow...")
         
         # Setup model
         self.setup_econbert()
         
-        # Load and prepare data
+        # Load data (NO balancing)
         df = self.load_and_prepare_data()
         
-        # Train model
-        results = self.train_econbert_only(df)
+        # Train with class weights
+        results = self.train_with_class_weights(df)
         
         # Save model
         self.save_model()
@@ -277,7 +301,7 @@ class EconBERTOnlyTrainer:
 
 def main():
     """Main function"""
-    trainer = EconBERTOnlyTrainer()
+    trainer = ClassWeightTrainer()
     results = trainer.run_training()
     print(f"\nFinal Results: {results}")
 

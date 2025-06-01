@@ -67,8 +67,9 @@ class EconBERTOnlyManager:
         
         # Load pipeline (should be econbert_only_pipeline.joblib)
         pipeline_files = [
-            "econbert_only_pipeline.joblib",  # New name
-            "hybrid_pipeline.joblib"          # Fallback to old name
+            "class_weighted_pipeline.joblib",  # New name
+            "econbert_only_pipeline.joblib",   # Previous name
+            "hybrid_pipeline.joblib"           # Original name
         ]
         
         for filename in pipeline_files:
