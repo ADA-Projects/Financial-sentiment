@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FinBERT API for Financial Sentiment Analysis
+EconBERT-Only API for Financial Sentiment Analysis
 """
 
 from fastapi import FastAPI, HTTPException
@@ -18,8 +18,8 @@ from contextlib import asynccontextmanager
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class FinBERTManager:
-    """Manages FinBERT model loading and inference"""
+class EconBERTOnlyManager:
+    """Manages EconBERT-only model loading and inference"""
     
     def __init__(self, model_dir: str = "outputs"):
         self.model_dir = Path(model_dir)
@@ -27,12 +27,11 @@ class FinBERTManager:
         self.model_cls = None
         self.pipeline = None
         self.config = None
-        self.model_type = "unknown"
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
     def load_models(self):
-        """Load FinBERT models with fallback to other models"""
-        logger.info("Loading models...")
+        """Load all model components"""
+        logger.info("Loading EconBERT-only models...")
         
         # Load configuration
         config_path = self.model_dir / "model_info.json"
@@ -40,8 +39,6 @@ class FinBERTManager:
             with open(config_path, 'r') as f:
                 model_info = json.load(f)
                 self.config = model_info.get("config", {})
-                detected_type = model_info.get("model_type", "unknown")
-                logger.info(f"Detected model type from config: {detected_type}")
         else:
             # Default config
             self.config = {
@@ -49,83 +46,44 @@ class FinBERTManager:
                 "max_length": 128
             }
         
-        # Try to load pipeline (FinBERT first)
+        # Load tokenizer
+        tokenizer_path = self.model_dir / "tokenizer"
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            str(tokenizer_path),
+            use_fast=True,
+            trust_remote_code=True
+        )
+        
+        # Load EconBERT model
+        model_path = self.model_dir / "econbert_model"
+        self.model_cls = AutoModelForSequenceClassification.from_pretrained(
+            str(model_path),
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
+        self.model_cls.eval()
+        self.model_cls.to(self.device)
+        
+        # Load pipeline (should be econbert_only_pipeline.joblib)
         pipeline_files = [
-            ("finbert_pipeline.joblib", "FinBERT"),
-            ("class_weighted_pipeline.joblib", "EconBERT (Class Weighted)"),
-            ("econbert_only_pipeline.joblib", "EconBERT (Only)"),
-            ("hybrid_pipeline.joblib", "EconBERT (Hybrid)")
+            "class_weighted_pipeline.joblib",  # New name
+            "econbert_only_pipeline.joblib",   # Previous name
+            "hybrid_pipeline.joblib"           # Original name
         ]
         
-        pipeline_loaded = False
-        for filename, model_name in pipeline_files:
+        for filename in pipeline_files:
             pipeline_path = self.model_dir / filename
             if pipeline_path.exists():
                 self.pipeline = joblib.load(pipeline_path)
-                self.model_type = model_name
-                logger.info(f"✅ Loaded pipeline: {filename} ({model_name})")
-                pipeline_loaded = True
+                logger.info(f"Loaded pipeline from {filename}")
                 break
         
-        if not pipeline_loaded:
+        if self.pipeline is None:
             raise FileNotFoundError("No pipeline found in outputs directory")
         
-        # Try to load tokenizer (FinBERT first)
-        tokenizer_dirs = [
-            ("finbert_tokenizer", "FinBERT"),
-            ("tokenizer", "EconBERT")
-        ]
-        
-        tokenizer_loaded = False
-        for dir_name, model_name in tokenizer_dirs:
-            tokenizer_path = self.model_dir / dir_name
-            if tokenizer_path.exists():
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    str(tokenizer_path),
-                    use_fast=True,
-                    trust_remote_code=True
-                )
-                logger.info(f"✅ Loaded tokenizer: {dir_name} ({model_name})")
-                tokenizer_loaded = True
-                break
-        
-        if not tokenizer_loaded:
-            raise FileNotFoundError("No tokenizer found in outputs directory")
-        
-        # Try to load model (FinBERT first)
-        model_dirs = [
-            ("finbert_model", "FinBERT"),
-            ("econbert_model", "EconBERT")
-        ]
-        
-        model_loaded = False
-        for dir_name, model_name in model_dirs:
-            model_path = self.model_dir / dir_name
-            if model_path.exists():
-                self.model_cls = AutoModelForSequenceClassification.from_pretrained(
-                    str(model_path),
-                    trust_remote_code=True,
-                    torch_dtype=torch.float16,
-                    device_map="auto"
-                )
-                self.model_cls.eval()
-                self.model_cls.to(self.device)
-                logger.info(f"✅ Loaded model: {dir_name} ({model_name})")
-                
-                # Update model type if we loaded a specific model
-                if "finbert" in dir_name.lower():
-                    self.model_type = "FinBERT"
-                elif "econbert" in dir_name.lower() and "FinBERT" not in self.model_type:
-                    self.model_type = "EconBERT"
-                
-                model_loaded = True
-                break
-        
-        if not model_loaded:
-            raise FileNotFoundError("No model found in outputs directory")
-        
-        logger.info(f"🎯 Final model configuration: {self.model_type}")
-        
+        logger.info("EconBERT-only models loaded successfully")
+    
     def extract_embeddings(self, sentences: List[str], batch_size: int = 32) -> np.ndarray:
         """Extract embeddings from sentences"""
         embeddings = []
@@ -150,17 +108,17 @@ class FinBERTManager:
         return np.vstack(embeddings)
     
     def predict(self, sentences: List[str]) -> List[Dict]:
-        """Make predictions using loaded model"""
+        """Make predictions using ONLY EconBERT embeddings"""
         if not sentences:
             return []
         
         if self.pipeline is None:
             raise RuntimeError("Pipeline not loaded")
         
-        # Extract embeddings
+        # Extract ONLY embeddings (no handcrafted features)
         embeddings = self.extract_embeddings(sentences)
         
-        # Use embeddings directly (no handcrafted features)
+        # Use embeddings directly (no concatenation)
         X = embeddings  # Shape: (n_sentences, 768)
         
         # Get predictions and probabilities
@@ -186,7 +144,7 @@ class FinBERTManager:
         return results
 
 # Global model manager
-model_manager = FinBERTManager()
+model_manager = EconBERTOnlyManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -199,9 +157,9 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app
 app = FastAPI(
-    title="Financial Sentiment Analysis API (FinBERT)",
-    description="API using FinBERT for financial sentiment analysis",
-    version="3.0.0",
+    title="Financial Sentiment Analysis API (EconBERT-Only)",
+    description="API using pure EconBERT embeddings for financial sentiment analysis",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -229,8 +187,8 @@ async def health_check():
     return {
         "status": "healthy",
         "model_loaded": model_manager.pipeline is not None,
-        "version": "3.0.0",
-        "model_type": model_manager.model_type
+        "version": "2.0.0",
+        "model_type": "econbert_only"
     }
 
 @app.post("/predict", response_model=BatchSentimentResponse)
@@ -276,13 +234,12 @@ async def predict_single_sentiment(request: SingleSentimentRequest):
 async def model_info():
     """Get model information"""
     return {
-        "model_type": f"{model_manager.model_type} Financial Sentiment Analysis",
+        "model_type": "EconBERT-Only (No Handcrafted Features)",
         "labels": list(model_manager.config["label_mapping"].keys()),
         "max_sequence_length": model_manager.config.get("max_length", 128),
         "device": str(model_manager.device),
         "embedding_dim": 768,
-        "pipeline_file": "Auto-detected from outputs folder",
-        "description": f"Using {model_manager.model_type} embeddings with Logistic Regression"
+        "features": "Pure EconBERT embeddings only"
     }
 
 @app.get("/examples")
@@ -293,9 +250,8 @@ async def get_examples():
             "Company X reported quarterly profit up 20%.",
             "Market crash threatens investor portfolios.",
             "Stock prices fell sharply after earnings miss.",
-            "Tesla delivers record number of vehicles this quarter.",
             "Fed raises interest rates causing market volatility.",
-            "Economic indicators remain stable this month."
+            "The board decided to maintain current dividend policy."
         ]
     }
 

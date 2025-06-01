@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-EconBERT training with class weights (NO upsampling)
-This should fix the over-duplication of negative examples
+FinBERT training script - should be more stable than EconBERT
 """
 
 import pandas as pd
@@ -17,7 +16,6 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, f1_score
 from sklearn.utils.class_weight import compute_class_weight
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from huggingface_hub import snapshot_download
 from tqdm.auto import tqdm
 import logging
 
@@ -25,9 +23,9 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class ClassWeightTrainer:
+class FinBERTTrainer:
     def __init__(self, config_path="config.json"):
-        """Initialize trainer with configuration"""
+        """Initialize FinBERT trainer"""
         self.config = self.load_config(config_path)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_cls = None
@@ -39,14 +37,13 @@ class ClassWeightTrainer:
         default_config = {
             "data_path": "data/data.csv",
             "output_dir": "outputs",
-            "model_name": "climatebert/econbert",
+            "model_name": "ProsusAI/finbert",  # Use FinBERT instead of EconBERT
             "max_length": 128,
             "batch_size": 32,
             "test_size": 0.2,
             "cv_folds": 5,
             "random_state": 42,
-            "use_class_weights": True,
-            "balance_data": False,  # NEW: Don't balance by upsampling
+            "balance_data": False,  # Use original distribution
             "label_mapping": {"negative": 0, "neutral": 1, "positive": 2}
         }
         
@@ -57,40 +54,30 @@ class ClassWeightTrainer:
         
         return default_config
     
-    def setup_econbert(self):
-        """Setup EconBERT model and tokenizer"""
-        logger.info("Setting up EconBERT...")
+    def setup_finbert(self):
+        """Setup FinBERT model and tokenizer"""
+        logger.info("Setting up FinBERT...")
         
-        # Download EconBERT repository
-        repo_local = snapshot_download(
-            repo_id=self.config["model_name"], 
-            repo_type="model"
-        )
-        
-        # Load tokenizer
-        tokenizer_path = Path(repo_local) / "EconBERT_Model" / "econbert_tokenizer"
+        # Load FinBERT directly from HuggingFace
         self.tokenizer = AutoTokenizer.from_pretrained(
-            str(tokenizer_path),
-            use_fast=True,
-            trust_remote_code=True
+            self.config["model_name"],
+            use_fast=True
         )
         
-        # Load model
-        model_path = Path(repo_local) / "EconBERT_Model" / "econbert_weights"
+        # Load FinBERT model
         self.model_cls = AutoModelForSequenceClassification.from_pretrained(
-            str(model_path),
-            trust_remote_code=True,
+            self.config["model_name"],
             num_labels=3,
-            torch_dtype=torch.float16,
-            device_map="auto"
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto" if torch.cuda.is_available() else None
         )
         self.model_cls.eval()
         self.model_cls.to(self.device)
         
-        logger.info("EconBERT setup complete")
+        logger.info("FinBERT setup complete")
     
     def load_and_prepare_data(self):
-        """Load data WITHOUT balancing (use original distribution)"""
+        """Load data with minimal balancing"""
         logger.info("Loading data...")
         
         df = pd.read_csv(self.config["data_path"])
@@ -102,19 +89,42 @@ class ClassWeightTrainer:
             percentage = 100 * count / len(df)
             logger.info(f"  {sentiment}: {count} ({percentage:.1f}%)")
         
-        # NO BALANCING - use original data as-is
-        logger.info(f"Using original dataset: {len(df)} samples (NO upsampling)")
+        # Light balancing: only upsample negative to match positive (not neutral)
+        negative_df = df[df['Sentiment'] == 'negative']
+        positive_df = df[df['Sentiment'] == 'positive']
+        neutral_df = df[df['Sentiment'] == 'neutral']
         
-        return df
+        # Target: make negative = positive count (don't touch neutral)
+        target_count = len(positive_df)
+        
+        if len(negative_df) < target_count:
+            negative_upsampled = negative_df.sample(
+                target_count, 
+                replace=True, 
+                random_state=self.config["random_state"]
+            )
+            balanced_df = pd.concat([negative_upsampled, positive_df, neutral_df])
+        else:
+            balanced_df = df
+        
+        balanced_df = balanced_df.sample(frac=1, random_state=self.config["random_state"]).reset_index(drop=True)
+        
+        logger.info(f"Lightly balanced dataset: {len(balanced_df)} samples")
+        balanced_counts = balanced_df['Sentiment'].value_counts()
+        for sentiment, count in balanced_counts.items():
+            percentage = 100 * count / len(balanced_df)
+            logger.info(f"  {sentiment}: {count} ({percentage:.1f}%)")
+        
+        return balanced_df
     
     def extract_embeddings(self, sentences, batch_size=None):
-        """Extract CLS embeddings from EconBERT"""
+        """Extract CLS embeddings from FinBERT"""
         if batch_size is None:
             batch_size = self.config["batch_size"]
             
         embeddings = []
         
-        for i in tqdm(range(0, len(sentences), batch_size), desc="Extracting embeddings"):
+        for i in tqdm(range(0, len(sentences), batch_size), desc="Extracting FinBERT embeddings"):
             batch = sentences[i:i+batch_size]
             
             inputs = self.tokenizer(
@@ -131,35 +141,15 @@ class ClassWeightTrainer:
                 cls_embeddings = hidden_states[:, 0, :].cpu().numpy()  # CLS token
                 embeddings.append(cls_embeddings)
             
-            # Clear GPU memory after each batch
+            # Clear GPU memory
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         
         return np.vstack(embeddings)
     
-    def compute_class_weights(self, y):
-        """Compute class weights for imbalanced data"""
-        classes = np.unique(y)
-        class_weights = compute_class_weight(
-            class_weight='balanced',
-            classes=classes,
-            y=y
-        )
-        
-        # Convert to dict format for LogisticRegression
-        class_weight_dict = {classes[i]: class_weights[i] for i in range(len(classes))}
-        
-        logger.info("Computed class weights:")
-        id2label = {v: k for k, v in self.config["label_mapping"].items()}
-        for class_id, weight in class_weight_dict.items():
-            label = id2label[class_id]
-            logger.info(f"  {label}: {weight:.3f}")
-        
-        return class_weight_dict
-    
-    def train_with_class_weights(self, df):
-        """Train using class weights (NO upsampling)"""
-        logger.info("Training with class weights (no upsampling)...")
+    def train_finbert(self, df):
+        """Train FinBERT with class weights"""
+        logger.info("Training FinBERT model...")
         
         sentences = df['Sentence'].tolist()
         labels = df['Sentiment'].map(self.config["label_mapping"]).values
@@ -168,7 +158,7 @@ class ClassWeightTrainer:
         embeddings = self.extract_embeddings(sentences)
         X = embeddings  # Shape: (n_samples, 768)
         
-        # Train/test split with stratification
+        # Train/test split
         X_train, X_test, y_train, y_test = train_test_split(
             X, labels,
             test_size=self.config["test_size"],
@@ -177,13 +167,24 @@ class ClassWeightTrainer:
         )
         
         # Compute class weights
-        class_weights = self.compute_class_weights(y_train)
+        classes = np.unique(y_train)
+        class_weights = compute_class_weight(
+            class_weight='balanced',
+            classes=classes,
+            y=y_train
+        )
+        class_weight_dict = {classes[i]: class_weights[i] for i in range(len(classes))}
         
-        # Create pipeline with class weights
+        logger.info("Class weights:")
+        id2label = {v: k for k, v in self.config["label_mapping"].items()}
+        for class_id, weight in class_weight_dict.items():
+            logger.info(f"  {id2label[class_id]}: {weight:.3f}")
+        
+        # Create pipeline
         self.pipeline = make_pipeline(
             StandardScaler(),
             LogisticRegression(
-                class_weight=class_weights,  # Use computed weights
+                class_weight=class_weight_dict,
                 max_iter=1000,
                 solver='lbfgs',
                 random_state=self.config["random_state"]
@@ -199,13 +200,10 @@ class ClassWeightTrainer:
             X_fold_train, X_fold_val = X_train[train_idx], X_train[val_idx]
             y_fold_train, y_fold_val = y_train[train_idx], y_train[val_idx]
             
-            # Compute weights for this fold
-            fold_weights = self.compute_class_weights(y_fold_train)
-            
             fold_pipeline = make_pipeline(
                 StandardScaler(),
                 LogisticRegression(
-                    class_weight=fold_weights,
+                    class_weight='balanced',
                     max_iter=1000,
                     solver='lbfgs',
                     random_state=self.config["random_state"]
@@ -223,30 +221,21 @@ class ClassWeightTrainer:
         # Train final model
         self.pipeline.fit(X_train, y_train)
         
-        # Evaluate on test set
+        # Evaluate
         y_pred = self.pipeline.predict(X_test)
         test_f1 = f1_score(y_test, y_pred, average='macro')
         logger.info(f"Test macro F1: {test_f1:.4f}")
         
-        # Detailed classification report
-        id2label = {v: k for k, v in self.config["label_mapping"].items()}
+        # Classification report
         target_names = [id2label[i] for i in sorted(id2label.keys())]
         
-        print("\nClass-Weighted Classification Report:")
+        print("\nFinBERT Classification Report:")
         print(classification_report(y_test, y_pred, target_names=target_names))
-        
-        # Show class distribution in test set
-        test_dist = pd.Series(y_test).value_counts().sort_index()
-        logger.info("Test set distribution:")
-        for class_id, count in test_dist.items():
-            label = id2label[class_id]
-            logger.info(f"  {label}: {count}")
         
         return {
             'cv_scores': cv_scores,
             'test_f1': test_f1,
-            'test_report': classification_report(y_test, y_pred, target_names=target_names, output_dict=True),
-            'class_weights': class_weights
+            'test_report': classification_report(y_test, y_pred, target_names=target_names, output_dict=True)
         }
     
     def save_model(self):
@@ -255,53 +244,52 @@ class ClassWeightTrainer:
         output_dir.mkdir(exist_ok=True)
         
         # Save pipeline
-        joblib.dump(self.pipeline, output_dir / "class_weighted_pipeline.joblib")
+        joblib.dump(self.pipeline, output_dir / "finbert_pipeline.joblib")
         
         # Save tokenizer
-        tokenizer_dir = output_dir / "tokenizer"
+        tokenizer_dir = output_dir / "finbert_tokenizer"
         self.tokenizer.save_pretrained(str(tokenizer_dir))
         
         # Save model
-        model_dir = output_dir / "econbert_model"
+        model_dir = output_dir / "finbert_model"
         self.model_cls.save_pretrained(str(model_dir))
         
         # Save configuration
         model_info = {
             "config": self.config,
             "model_name": self.config["model_name"],
-            "model_type": "econbert_class_weighted",
+            "model_type": "finbert_embeddings",
             "embedding_dim": 768,
-            "total_features": 768,
-            "training_method": "class_weights_no_upsampling"
+            "total_features": 768
         }
         
         with open(output_dir / "model_info.json", 'w') as f:
             json.dump(model_info, f, indent=2)
         
-        logger.info(f"Class-weighted model saved to {output_dir}")
+        logger.info(f"FinBERT model saved to {output_dir}")
     
     def run_training(self):
         """Main training workflow"""
-        logger.info("Starting class-weighted training workflow...")
+        logger.info("Starting FinBERT training workflow...")
         
         # Setup model
-        self.setup_econbert()
+        self.setup_finbert()
         
-        # Load data (NO balancing)
+        # Load data
         df = self.load_and_prepare_data()
         
-        # Train with class weights
-        results = self.train_with_class_weights(df)
+        # Train model
+        results = self.train_finbert(df)
         
         # Save model
         self.save_model()
         
-        logger.info("Training complete!")
+        logger.info("FinBERT training complete!")
         return results
 
 def main():
     """Main function"""
-    trainer = ClassWeightTrainer()
+    trainer = FinBERTTrainer()
     results = trainer.run_training()
     print(f"\nFinal Results: {results}")
 
