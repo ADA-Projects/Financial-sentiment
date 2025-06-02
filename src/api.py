@@ -1,302 +1,317 @@
 #!/usr/bin/env python3
 """
-FinBERT API for Financial Sentiment Analysis
+Enhanced Financial Sentiment Analysis API
+Features: Multiple models, confidence scores, batch processing, caching
 """
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from typing import List, Dict
-import numpy as np
-import torch
-import joblib
+import time
 import json
-from pathlib import Path
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import logging
-from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import List, Dict, Optional, Union
+from pathlib import Path
 
+import joblib
+import torch
+import torch.nn.functional as F
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, validator
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import numpy as np
+
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class FinBERTManager:
-    """Manages FinBERT model loading and inference"""
-    
-    def __init__(self, model_dir: str = "outputs"):
-        self.model_dir = Path(model_dir)
-        self.tokenizer = None
-        self.model_cls = None
-        self.pipeline = None
-        self.config = None
-        self.model_type = "unknown"
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-    def load_models(self):
-        """Load FinBERT models with fallback to other models"""
-        logger.info("Loading models...")
-        
-        # Load configuration
-        config_path = self.model_dir / "model_info.json"
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                model_info = json.load(f)
-                self.config = model_info.get("config", {})
-                detected_type = model_info.get("model_type", "unknown")
-                logger.info(f"Detected model type from config: {detected_type}")
-        else:
-            # Default config
-            self.config = {
-                "label_mapping": {"negative": 0, "neutral": 1, "positive": 2},
-                "max_length": 128
-            }
-        
-        # Try to load pipeline (FinBERT first)
-        pipeline_files = [
-            ("finbert_pipeline.joblib", "FinBERT"),
-            ("class_weighted_pipeline.joblib", "EconBERT (Class Weighted)"),
-            ("econbert_only_pipeline.joblib", "EconBERT (Only)"),
-            ("hybrid_pipeline.joblib", "EconBERT (Hybrid)")
-        ]
-        
-        pipeline_loaded = False
-        for filename, model_name in pipeline_files:
-            pipeline_path = self.model_dir / filename
-            if pipeline_path.exists():
-                self.pipeline = joblib.load(pipeline_path)
-                self.model_type = model_name
-                logger.info(f"✅ Loaded pipeline: {filename} ({model_name})")
-                pipeline_loaded = True
-                break
-        
-        if not pipeline_loaded:
-            raise FileNotFoundError("No pipeline found in outputs directory")
-        
-        # Try to load tokenizer (FinBERT first)
-        tokenizer_dirs = [
-            ("finbert_tokenizer", "FinBERT"),
-            ("tokenizer", "EconBERT")
-        ]
-        
-        tokenizer_loaded = False
-        for dir_name, model_name in tokenizer_dirs:
-            tokenizer_path = self.model_dir / dir_name
-            if tokenizer_path.exists():
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    str(tokenizer_path),
-                    use_fast=True,
-                    trust_remote_code=True
-                )
-                logger.info(f"✅ Loaded tokenizer: {dir_name} ({model_name})")
-                tokenizer_loaded = True
-                break
-        
-        if not tokenizer_loaded:
-            raise FileNotFoundError("No tokenizer found in outputs directory")
-        
-        # Try to load model (FinBERT first)
-        model_dirs = [
-            ("finbert_model", "FinBERT"),
-            ("econbert_model", "EconBERT")
-        ]
-        
-        model_loaded = False
-        for dir_name, model_name in model_dirs:
-            model_path = self.model_dir / dir_name
-            if model_path.exists():
-                self.model_cls = AutoModelForSequenceClassification.from_pretrained(
-                    str(model_path),
-                    trust_remote_code=True,
-                    torch_dtype=torch.float16,
-                    device_map="auto"
-                )
-                self.model_cls.eval()
-                self.model_cls.to(self.device)
-                logger.info(f"✅ Loaded model: {dir_name} ({model_name})")
-                
-                # Update model type if we loaded a specific model
-                if "finbert" in dir_name.lower():
-                    self.model_type = "FinBERT"
-                elif "econbert" in dir_name.lower() and "FinBERT" not in self.model_type:
-                    self.model_type = "EconBERT"
-                
-                model_loaded = True
-                break
-        
-        if not model_loaded:
-            raise FileNotFoundError("No model found in outputs directory")
-        
-        logger.info(f"🎯 Final model configuration: {self.model_type}")
-        
-    def extract_embeddings(self, sentences: List[str], batch_size: int = 32) -> np.ndarray:
-        """Extract embeddings from sentences"""
-        embeddings = []
-        
-        for i in range(0, len(sentences), batch_size):
-            batch = sentences[i:i+batch_size]
-            
-            inputs = self.tokenizer(
-                batch,
-                return_tensors="pt",
-                padding="longest", 
-                truncation=True,
-                max_length=self.config.get("max_length", 128)
-            ).to(self.device)
-            
-            with torch.no_grad():
-                outputs = self.model_cls(**inputs, output_hidden_states=True)
-                hidden_states = outputs.hidden_states[-1]
-                cls_embeddings = hidden_states[:, 0, :].cpu().numpy()
-                embeddings.append(cls_embeddings)
-        
-        return np.vstack(embeddings)
-    
-    def predict(self, sentences: List[str]) -> List[Dict]:
-        """Make predictions using loaded model"""
-        if not sentences:
-            return []
-        
-        if self.pipeline is None:
-            raise RuntimeError("Pipeline not loaded")
-        
-        # Extract embeddings
-        embeddings = self.extract_embeddings(sentences)
-        
-        # Use embeddings directly (no handcrafted features)
-        X = embeddings  # Shape: (n_sentences, 768)
-        
-        # Get predictions and probabilities
-        predictions = self.pipeline.predict(X)
-        probabilities = self.pipeline.predict_proba(X)
-        
-        # Convert to readable format
-        id2label = {v: k for k, v in self.config["label_mapping"].items()}
-        
-        results = []
-        for i, (pred, probs) in enumerate(zip(predictions, probabilities)):
-            result = {
-                "sentence": sentences[i],
-                "predicted_sentiment": id2label[pred],
-                "confidence": float(np.max(probs)),
-                "probabilities": {
-                    id2label[j]: float(probs[j]) 
-                    for j in range(len(probs))
-                }
-            }
-            results.append(result)
-        
-        return results
-
-# Global model manager
-model_manager = FinBERTManager()
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Manage application lifespan"""
-    # Startup
-    model_manager.load_models()
-    yield
-    # Shutdown
-    logger.info("Shutting down...")
-
-# Create FastAPI app
+# Initialize FastAPI app
 app = FastAPI(
-    title="Financial Sentiment Analysis API (FinBERT)",
-    description="API using FinBERT for financial sentiment analysis",
-    version="3.0.0",
-    lifespan=lifespan
+    title="Financial Sentiment Analysis API",
+    description="Production-ready sentiment analysis for financial text using FinBERT and EconBERT",
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-# Request/Response models
-class SentimentRequest(BaseModel):
-    sentences: List[str] = Field(..., min_items=1, max_items=100)
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-class SingleSentimentRequest(BaseModel):
-    sentence: str = Field(..., min_length=1, max_length=500)
+# Global variables for models and cache
+models = {}
+tokenizers = {}
+model_info = {}
+prediction_cache = {}
+
+class SingleHeadline(BaseModel):
+    """Single headline for sentiment analysis"""
+    text: str = Field(..., min_length=1, max_length=1000, description="Financial text to analyze")
+    model: str = Field(default="finbert", description="Model to use: 'finbert' or 'econbert'")
     
+    @validator('text')
+    def validate_text(cls, v):
+        if not v.strip():
+            raise ValueError('Text cannot be empty')
+        return v.strip()
+
+class BatchHeadlines(BaseModel):
+    """Batch of headlines for sentiment analysis"""
+    texts: List[str] = Field(..., min_items=1, max_items=100, description="List of financial texts")
+    model: str = Field(default="finbert", description="Model to use: 'finbert' or 'econbert'")
+
 class SentimentResponse(BaseModel):
-    sentence: str
-    predicted_sentiment: str
+    """Enhanced sentiment analysis response"""
+    text: str
+    sentiment: str
     confidence: float
     probabilities: Dict[str, float]
+    model_used: str
+    processing_time_ms: float
+    timestamp: str
 
 class BatchSentimentResponse(BaseModel):
+    """Batch sentiment analysis response"""
     results: List[SentimentResponse]
+    total_processed: int
+    average_confidence: float
     processing_time_ms: float
+    model_used: str
 
-# API Endpoints
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "model_loaded": model_manager.pipeline is not None,
-        "version": "3.0.0",
-        "model_type": model_manager.model_type
+class ModelInfo(BaseModel):
+    """Model information response"""
+    available_models: List[str]
+    default_model: str
+    model_details: Dict[str, Dict]
+
+def load_models():
+    """Load all available models and tokenizers"""
+    global models, tokenizers, model_info
+    
+    logger.info("Loading models...")
+    
+    # Try to load model info
+    info_path = Path("outputs/model_info.json")
+    if info_path.exists():
+        with open(info_path, 'r') as f:
+            model_info = json.load(f)
+    
+    # Define available models
+    available_models = {
+        "finbert": {
+            "model_path": "outputs/finbert_model",
+            "tokenizer_path": "outputs/finbert_tokenizer",
+            "description": "FinBERT model fine-tuned for financial sentiment"
+        },
+        "econbert": {
+            "model_path": "outputs/econbert_model", 
+            "tokenizer_path": "outputs/tokenizer",
+            "description": "EconBERT model for economic text analysis"
+        }
     }
+    
+    # Try to load pipeline models first (if they exist)
+    pipeline_paths = {
+        "finbert": "outputs/finbert_pipeline.joblib",
+        "econbert": "outputs/class_weighted_pipeline.joblib"
+    }
+    
+    for model_name, info in available_models.items():
+        try:
+            # First try to load pipeline (faster)
+            pipeline_path = pipeline_paths.get(model_name)
+            if pipeline_path and Path(pipeline_path).exists():
+                logger.info(f"Loading {model_name} pipeline from {pipeline_path}")
+                models[model_name] = joblib.load(pipeline_path)
+                tokenizers[model_name] = None  # Pipeline includes tokenizer
+            else:
+                # Fallback to manual loading
+                model_path = Path(info["model_path"])
+                tokenizer_path = Path(info["tokenizer_path"])
+                
+                if model_path.exists() and tokenizer_path.exists():
+                    logger.info(f"Loading {model_name} model and tokenizer")
+                    tokenizers[model_name] = AutoTokenizer.from_pretrained(str(tokenizer_path))
+                    models[model_name] = AutoModelForSequenceClassification.from_pretrained(str(model_path))
+                    models[model_name].eval()  # Set to evaluation mode
+                else:
+                    logger.warning(f"Could not find {model_name} model files")
+                    
+        except Exception as e:
+            logger.error(f"Failed to load {model_name}: {e}")
+    
+    logger.info(f"Successfully loaded models: {list(models.keys())}")
 
-@app.post("/predict", response_model=BatchSentimentResponse)
-async def predict_sentiment(request: SentimentRequest):
-    """Predict sentiment for a list of sentences"""
-    import time
+def predict_sentiment(text: str, model_name: str = "finbert") -> Dict:
+    """Predict sentiment with confidence scores"""
+    if model_name not in models:
+        raise HTTPException(status_code=400, detail=f"Model {model_name} not available")
     
     start_time = time.time()
     
     try:
-        if model_manager.pipeline is None:
-            raise HTTPException(status_code=503, detail="Models not loaded")
+        model = models[model_name]
         
-        # Make predictions
-        results = model_manager.predict(request.sentences)
+        # Check if it's a pipeline or raw model
+        if hasattr(model, 'predict_proba'):
+            # It's a sklearn pipeline
+            probs = model.predict_proba([text])[0]
+            prediction = model.predict([text])[0]
+            
+            # Map to sentiment labels
+            labels = ["negative", "neutral", "positive"]
+            prob_dict = {labels[i]: float(probs[i]) for i in range(len(probs))}
+            
+        else:
+            # It's a transformers model
+            tokenizer = tokenizers[model_name]
+            inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
+            
+            with torch.no_grad():
+                outputs = model(**inputs)
+                probs = F.softmax(outputs.logits, dim=-1).cpu().numpy()[0]
+            
+            labels = ["negative", "neutral", "positive"]
+            prob_dict = {labels[i]: float(probs[i]) for i in range(len(probs))}
+            prediction = labels[np.argmax(probs)]
         
+        confidence = max(prob_dict.values())
         processing_time = (time.time() - start_time) * 1000
         
-        return BatchSentimentResponse(
-            results=[SentimentResponse(**result) for result in results],
-            processing_time_ms=processing_time
-        )
+        return {
+            "text": text,
+            "sentiment": prediction,
+            "confidence": confidence,
+            "probabilities": prob_dict,
+            "model_used": model_name,
+            "processing_time_ms": round(processing_time, 2),
+            "timestamp": datetime.now().isoformat()
+        }
         
     except Exception as e:
-        logger.error(f"Prediction error: {str(e)}")
+        logger.error(f"Prediction error: {e}")
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
-@app.post("/predict/single", response_model=SentimentResponse)
-async def predict_single_sentiment(request: SingleSentimentRequest):
-    """Predict sentiment for a single sentence"""
-    try:
-        if model_manager.pipeline is None:
-            raise HTTPException(status_code=503, detail="Models not loaded")
-        
-        results = model_manager.predict([request.sentence])
-        return SentimentResponse(**results[0]) if results else None
-        
-    except Exception as e:
-        logger.error(f"Prediction error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+def get_cache_key(text: str, model: str) -> str:
+    """Generate cache key for predictions"""
+    import hashlib
+    return hashlib.md5(f"{text}_{model}".encode()).hexdigest()
 
-@app.get("/model/info")
-async def model_info():
-    """Get model information"""
+@app.on_event("startup")
+async def startup_event():
+    """Load models on startup"""
+    load_models()
+    logger.info("API startup complete")
+
+@app.get("/", response_model=Dict[str, str])
+async def root():
+    """API health check and info"""
     return {
-        "model_type": f"{model_manager.model_type} Financial Sentiment Analysis",
-        "labels": list(model_manager.config["label_mapping"].keys()),
-        "max_sequence_length": model_manager.config.get("max_length", 128),
-        "device": str(model_manager.device),
-        "embedding_dim": 768,
-        "pipeline_file": "Auto-detected from outputs folder",
-        "description": f"Using {model_manager.model_type} embeddings with Logistic Regression"
+        "message": "Financial Sentiment Analysis API",
+        "version": "2.0.0",
+        "status": "healthy",
+        "available_models": list(models.keys()),
+        "documentation": "/docs"
     }
 
-@app.get("/examples")
-async def get_examples():
-    """Get example sentences for testing"""
+@app.get("/models", response_model=ModelInfo)
+async def get_models():
+    """Get information about available models"""
+    model_details = {}
+    for model_name in models.keys():
+        model_details[model_name] = {
+            "description": f"{model_name.title()} model for financial sentiment analysis",
+            "labels": ["negative", "neutral", "positive"],
+            "loaded": True
+        }
+    
+    return ModelInfo(
+        available_models=list(models.keys()),
+        default_model="finbert",
+        model_details=model_details
+    )
+
+@app.post("/analyze", response_model=SentimentResponse)
+async def analyze_sentiment(item: SingleHeadline):
+    """Analyze sentiment of a single text"""
+    # Check cache first
+    cache_key = get_cache_key(item.text, item.model)
+    if cache_key in prediction_cache:
+        logger.info("Cache hit")
+        return SentimentResponse(**prediction_cache[cache_key])
+    
+    # Make prediction
+    result = predict_sentiment(item.text, item.model)
+    
+    # Cache result (with simple size limit)
+    if len(prediction_cache) < 1000:  # Simple cache size limit
+        prediction_cache[cache_key] = result
+    
+    return SentimentResponse(**result)
+
+@app.post("/analyze/batch", response_model=BatchSentimentResponse)
+async def analyze_batch(item: BatchHeadlines):
+    """Analyze sentiment of multiple texts"""
+    start_time = time.time()
+    results = []
+    
+    for text in item.texts:
+        try:
+            result = predict_sentiment(text, item.model)
+            results.append(SentimentResponse(**result))
+        except Exception as e:
+            logger.error(f"Failed to process text: {text[:50]}... Error: {e}")
+            # Continue with other texts
+            continue
+    
+    total_time = (time.time() - start_time) * 1000
+    avg_confidence = np.mean([r.confidence for r in results]) if results else 0.0
+    
+    return BatchSentimentResponse(
+        results=results,
+        total_processed=len(results),
+        average_confidence=round(avg_confidence, 3),
+        processing_time_ms=round(total_time, 2),
+        model_used=item.model
+    )
+
+@app.get("/cache/stats")
+async def cache_stats():
+    """Get cache statistics"""
     return {
-        "examples": [
-            "Company X reported quarterly profit up 20%.",
-            "Market crash threatens investor portfolios.",
-            "Stock prices fell sharply after earnings miss.",
-            "Tesla delivers record number of vehicles this quarter.",
-            "Fed raises interest rates causing market volatility.",
-            "Economic indicators remain stable this month."
-        ]
+        "cache_size": len(prediction_cache),
+        "cache_limit": 1000,
+        "hit_rate": "Not implemented"  # Would need hit/miss counters
+    }
+
+@app.delete("/cache/clear")
+async def clear_cache():
+    """Clear prediction cache"""
+    global prediction_cache
+    cache_size = len(prediction_cache)
+    prediction_cache.clear()
+    return {"message": f"Cache cleared. Removed {cache_size} entries."}
+
+# Legacy endpoint for backward compatibility
+@app.post("/score")
+async def score_headline(item: SingleHeadline):
+    """Legacy endpoint - redirects to /analyze"""
+    result = await analyze_sentiment(item)
+    # Return in old format for compatibility
+    return result.probabilities
+
+@app.get("/health")
+async def health_check():
+    """Detailed health check"""
+    return {
+        "status": "healthy",
+        "models_loaded": list(models.keys()),
+        "cache_size": len(prediction_cache),
+        "timestamp": datetime.now().isoformat()
     }
 
 if __name__ == "__main__":
