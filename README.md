@@ -1,6 +1,6 @@
 # 📈 Financial Sentiment Analysis API
 
-A production-ready sentiment analysis API for financial text using fine-tuned FinBERT and EconBERT models. This project provides state-of-the-art sentiment classification specifically designed for financial news, earnings reports, and market commentary.
+A production-ready sentiment analysis API for financial text using fine-tuned FinBERT. This project provides state-of-the-art sentiment classification specifically designed for financial news, earnings reports, and market commentary.
 
 ![Python](https://img.shields.io/badge/python-v3.10+-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)
@@ -9,7 +9,7 @@ A production-ready sentiment analysis API for financial text using fine-tuned Fi
 
 ## 🚀 Features
 
-- **Multiple Models**: Fine-tuned FinBERT and EconBERT models optimized for financial sentiment
+- **Multiple Models**: Fine-tuned FinBERT model optimized for financial sentiment
 - **High Performance**: Efficient inference with caching and batch processing
 - **Production Ready**: Docker containerization, health checks, and monitoring
 - **Enhanced API**: Confidence scores, batch processing, and detailed responses
@@ -18,27 +18,26 @@ A production-ready sentiment analysis API for financial text using fine-tuned Fi
 
 ## 📊 Model Performance
 
-| Model | Accuracy | F1-Score | Precision | Recall |
-|-------|----------|----------|-----------|--------|
-| FinBERT | 85.2% | 83.1% | 84.5% | 81.8% |
-| EconBERT | 82.7% | 80.9% | 82.1% | 79.7% |
+| Model | Accuracy | F1-Score | Training Data |
+|-------|----------|----------|---------------|
+| FinBERT (Fine-tuned) | 75%+ | 0.73+ | Financial PhraseBank |
+
+*Performance metrics from validation set. Actual performance may vary by use case.*
 
 ## 🏗️ Architecture
 
 ```
 ├── src/
-│   ├── api.py              # Enhanced FastAPI application
-│   ├── dataset.py          # Data loading and preprocessing
+│   ├── api.py              # FastAPI application
+│   ├── dataset.py          # Data loading utilities  
 │   └── train_model.py      # Model training pipeline
 ├── outputs/
-│   ├── finbert_model/      # Fine-tuned FinBERT model
-│   ├── econbert_model/     # Fine-tuned EconBERT model
-│   └── *.joblib           # Trained pipelines
+│   ├── finbert_fixed_model/      # Fine-tuned FinBERT model
+│   ├── finbert_fixed_tokenizer/  # Model tokenizer
+│   └── finbert_fixed_training/   # Training checkpoints
 ├── data/
 │   └── data.csv           # Training dataset
-├── docker-compose.yml     # Multi-service deployment
-├── dockerfile            # Production Docker image
-└── deployment.sh         # Automated deployment script
+└── test_api.py           # API testing suite
 ```
 
 ## 🚀 Quick Start
@@ -171,9 +170,6 @@ curl -X POST "http://localhost:8000/analyze/batch" \
 ```bash
 # Train FinBERT model
 python src/train_model.py --model finbert --epochs 3 --batch_size 16
-
-# Train EconBERT model  
-python src/train_model.py --model econbert --epochs 3 --batch_size 16
 ```
 
 ### Data Requirements
