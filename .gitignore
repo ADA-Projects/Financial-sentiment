@@ -48,3 +48,18 @@ temp/
 # Temporary and Binary Files
 *.tar.gz
 *.npy
+# Training artifacts
+outputs/finbert_fixed_training/
+outputs/*_training/
+*.log
+
+# Temporary files
+fix_labels.py
+*_diagnostic.py
+robust_label_fix.py
+quick_retrain.py
+
+# Model backups
+outputs/broken_models/
+outputs/old_models/
+

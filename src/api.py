@@ -95,14 +95,9 @@ def load_models():
     # Define available models with their paths
     available_models = {
         "finbert": {
-            "model_path": "outputs/finbert_model",
-            "tokenizer_path": "outputs/finbert_tokenizer",
+            "model_path": "outputs/finbert_fixed_model",
+            "tokenizer_path": "outputs/finbert_fixed_tokenizer",
             "description": "FinBERT model fine-tuned for financial sentiment"
-        },
-        "econbert": {
-            "model_path": "outputs/econbert_model", 
-            "tokenizer_path": "outputs/tokenizer",
-            "description": "EconBERT model for economic text analysis"
         }
     }
     
