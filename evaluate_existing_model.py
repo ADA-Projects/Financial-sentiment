@@ -233,6 +233,20 @@ class ModelEvaluator:
         """Save evaluation results"""
         print("\n💾 Saving evaluation results...")
         
+        # Convert numpy types to Python types for JSON serialization
+        def convert_numpy_types(obj):
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {key: convert_numpy_types(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_types(item) for item in obj]
+            return obj
+        
         # Create comprehensive results
         results = {
             'model_info': {
@@ -241,14 +255,14 @@ class ModelEvaluator:
                 'model_type': 'finbert_financial_sentiment'
             },
             'performance': {
-                'accuracy': metrics['accuracy'],
-                'f1_macro': metrics['f1_macro'],
-                'f1_weighted': metrics['f1_weighted']
+                'accuracy': float(metrics['accuracy']),
+                'f1_macro': float(metrics['f1_macro']),
+                'f1_weighted': float(metrics['f1_weighted'])
             },
-            'detailed_metrics': metrics['classification_report'],
+            'detailed_metrics': convert_numpy_types(metrics['classification_report']),
             'clear_examples': {
-                'accuracy': clear_results[0],
-                'results': clear_results[1]
+                'accuracy': float(clear_results[0]),
+                'results': convert_numpy_types(clear_results[1])
             },
             'evaluation_date': pd.Timestamp.now().isoformat()
         }
