@@ -296,7 +296,7 @@ async def analyze_batch(item: BatchHeadlines):
     
     for text in item.texts:
         try:
-            result = predict_sentiment(text, item.model)
+            result = predict_sentiment(text, item.model, use_improved=True)
             results.append(SentimentResponse(**result))
         except Exception as e:
             logger.error(f"Failed to process text: {text[:50]}... Error: {e}")
