@@ -66,18 +66,58 @@ Improved method:  negative ✅  # Correctly identified!
 ## 🏗️ Architecture
 
 ```
-├── src/
-│   ├── api.py              # FastAPI application
-│   ├── dataset.py          # Data loading utilities  
-│   └── train_model.py      # Model training pipeline
-├── outputs/
-│   ├── finbert_fixed_model/      # Fine-tuned FinBERT model
-│   ├── finbert_fixed_tokenizer/  # Model tokenizer
-│   └── finbert_fixed_training/   # Training checkpoints
+Financial-sentiment/
+├── .devcontainer/
+│   └── devcontainer.json          # VS Code development container
+├── .env.template                  # Environment variables template
+├── .gitignore                     # Git ignore patterns
+├── LICENSE                        # MIT license
+├── README.md                      # Project documentation
 ├── data/
-│   └── data.csv           # Training dataset
-└── test_api.py           # API testing suite
+│   ├── data.csv                   # Financial PhraseBank dataset
+│   └── download.py                # Dataset download script
+├── deployment.sh                  # Automated deployment script
+├── docker-compose.yml             # Multi-service deployment
+├── dockerfile                     # Production Docker image
+├── outputs/
+│   ├── confusion_matrix.png       # Model performance visualization
+│   ├── finbert_fixed_model/       # Fine-tuned FinBERT model
+│   │   ├── config.json            # Model configuration
+│   │   └── model.safetensors      # Model weights
+│   ├── finbert_fixed_tokenizer/   # Model tokenizer
+│   │   ├── special_tokens_map.json
+│   │   ├── tokenizer.json
+│   │   ├── tokenizer_config.json
+│   │   └── vocab.txt
+│   ├── model_evaluation.json      # Performance metrics
+│   └── quick_negative_fix_results.json  # Threshold optimization config
+├── requirements.txt               # Python dependencies
+├── src/
+│   ├── __init__.py               # Package initialization
+│   ├── api.py                    # FastAPI application
+│   ├── dataset.py                # Data loading utilities
+│   └── train_model.py            # Model training pipeline
+└── test_api.py                   # API testing suite
 ```
+
+### Key Components
+
+#### **Production Model** (`outputs/`)
+- **finbert_fixed_model/**: Production-ready FinBERT model with optimized performance
+- **finbert_fixed_tokenizer/**: Corresponding tokenizer for text preprocessing
+- **model_evaluation.json**: Comprehensive performance metrics and evaluation results
+- **quick_negative_fix_results.json**: Threshold optimization configuration for improved negative detection
+
+#### **API Layer** (`src/`)
+- **api.py**: FastAPI application with multiple endpoints (standard, improved, comparison)
+- **dataset.py**: Data loading and preprocessing utilities
+- **train_model.py**: Complete training pipeline for model fine-tuning
+
+#### **Deployment** (Root)
+- **deployment.sh**: One-command deployment with health checks and testing
+- **dockerfile**: Multi-stage production Docker image
+- **docker-compose.yml**: Full production setup with optional Redis and Nginx
+
 
 ## 🚀 Quick Start
 
