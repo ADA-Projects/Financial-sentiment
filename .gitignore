@@ -83,3 +83,6 @@ outputs/*_training/
 # Development outputs
 outputs/api_integration_snippet.py
 outputs/readme_metrics.md
+
+# Notebooks (focus on production API)
+notebooks/
