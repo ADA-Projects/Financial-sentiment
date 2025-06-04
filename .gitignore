@@ -63,3 +63,23 @@ quick_retrain.py
 outputs/broken_models/
 outputs/old_models/
 
+
+# Environment and logs
+.env
+*.log
+improvement_log_*
+evaluation_log_*
+
+# Temporary development files
+*_diagnostic.py
+*_temp.py
+quick_*.py
+test_improved_*.py
+
+# Large training artifacts (optional)
+outputs/*/checkpoint-*/
+outputs/*_training/
+
+# Development outputs
+outputs/api_integration_snippet.py
+outputs/readme_metrics.md
