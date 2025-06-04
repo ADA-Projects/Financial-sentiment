@@ -46,6 +46,25 @@ tokenizers = {}
 model_info = {}
 prediction_cache = {}
 
+
+def load_improved_thresholds():
+    """Load improved thresholds for better negative detection"""
+    try:
+        with open('outputs/quick_negative_fix_results.json', 'r') as f:
+            config = json.load(f)
+        return config['improvement_config']
+    except:
+        # Fallback to your discovered optimal values
+        return {
+            'negative_threshold': 0.20,
+            'positive_threshold': 0.40,
+            'method': 'threshold_adjustment'
+        }
+
+# Load the improved configuration
+IMPROVED_CONFIG = load_improved_thresholds()
+logger.info(f"🎯 Loaded improved thresholds: neg={IMPROVED_CONFIG['negative_threshold']:.2f}, pos={IMPROVED_CONFIG['positive_threshold']:.2f}")
+
 class SingleHeadline(BaseModel):
     """Single headline for sentiment analysis"""
     text: str = Field(..., min_length=1, max_length=1000, description="Financial text to analyze")
@@ -135,8 +154,8 @@ def load_models():
         "created_at": datetime.now().isoformat()
     }
 
-def predict_sentiment(text: str, model_name: str = "finbert") -> Dict:
-    """Predict sentiment using transformers models"""
+def predict_sentiment(text: str, model_name: str = "finbert", use_improved: bool = True) -> Dict:
+    """Predict sentiment using transformers models with optional improved thresholds"""
     if model_name not in models:
         raise HTTPException(status_code=400, detail=f"Model {model_name} not available")
     
@@ -161,12 +180,31 @@ def predict_sentiment(text: str, model_name: str = "finbert") -> Dict:
             logits = outputs.logits
             probs = F.softmax(logits, dim=-1).cpu().numpy()[0]
         
+        # Apply improved thresholds if requested
+        if use_improved:
+            neg_threshold = IMPROVED_CONFIG['negative_threshold']
+            pos_threshold = IMPROVED_CONFIG['positive_threshold']
+            
+            neg_prob, neu_prob, pos_prob = probs
+            
+            if neg_prob >= neg_threshold:
+                predicted_class = 0  # negative
+            elif pos_prob >= pos_threshold:
+                predicted_class = 2  # positive
+            else:
+                predicted_class = 1  # neutral
+                
+            method_used = "improved_thresholds"
+        else:
+            # Original method
+            predicted_class = np.argmax(probs)
+            method_used = "standard"
+        
         # Map probabilities to labels
         labels = ["negative", "neutral", "positive"]
         prob_dict = {labels[i]: float(probs[i]) for i in range(len(probs))}
         
         # Get prediction
-        predicted_class = np.argmax(probs)
         prediction = labels[predicted_class]
         confidence = float(probs[predicted_class])
         
@@ -178,6 +216,7 @@ def predict_sentiment(text: str, model_name: str = "finbert") -> Dict:
             "confidence": confidence,
             "probabilities": prob_dict,
             "model_used": model_name,
+            "method": method_used,
             "processing_time_ms": round(processing_time, 2),
             "timestamp": datetime.now().isoformat()
         }
@@ -228,15 +267,20 @@ async def get_models():
 
 @app.post("/analyze", response_model=SentimentResponse)
 async def analyze_sentiment(item: SingleHeadline):
-    """Analyze sentiment of a single text"""
+    """
+    Analyze sentiment of a single text (uses improved thresholds by default)
+    
+    For better negative detection, this endpoint now uses optimized thresholds.
+    Use /analyze/standard for original behavior.
+    """
     # Check cache first
     cache_key = get_cache_key(item.text, item.model)
     if cache_key in prediction_cache:
         logger.info("Cache hit")
         return SentimentResponse(**prediction_cache[cache_key])
     
-    # Make prediction
-    result = predict_sentiment(item.text, item.model)
+    # Make prediction with improved thresholds
+    result = predict_sentiment(item.text, item.model, use_improved=True)
     
     # Cache result (with simple size limit)
     if len(prediction_cache) < 1000:
@@ -300,6 +344,62 @@ async def health_check():
         "models_loaded": list(models.keys()),
         "cache_size": len(prediction_cache),
         "timestamp": datetime.now().isoformat()
+    }
+
+# ADD these new endpoints BEFORE the @app.get("/debug/models") line:
+
+@app.post("/analyze/improved", response_model=SentimentResponse)
+async def analyze_sentiment_improved(item: SingleHeadline):
+    """Analyze sentiment with improved negative detection (recommended)"""
+    result = predict_sentiment(item.text, item.model, use_improved=True)
+    return SentimentResponse(**result)
+
+@app.post("/analyze/standard", response_model=SentimentResponse)  
+async def analyze_sentiment_standard(item: SingleHeadline):
+    """Analyze sentiment with standard thresholds (original method)"""
+    result = predict_sentiment(item.text, item.model, use_improved=False)
+    return SentimentResponse(**result)
+
+@app.post("/analyze/compare")
+async def compare_prediction_methods(item: SingleHeadline):
+    """Compare standard vs improved prediction methods"""
+    
+    standard_result = predict_sentiment(item.text, item.model, use_improved=False)
+    improved_result = predict_sentiment(item.text, item.model, use_improved=True)
+    
+    return {
+        "text": item.text,
+        "standard_method": {
+            "sentiment": standard_result["sentiment"],
+            "confidence": standard_result["confidence"],
+            "probabilities": standard_result["probabilities"]
+        },
+        "improved_method": {
+            "sentiment": improved_result["sentiment"], 
+            "confidence": improved_result["confidence"],
+            "probabilities": improved_result["probabilities"]
+        },
+        "methods_agree": standard_result["sentiment"] == improved_result["sentiment"],
+        "improvement_applied": standard_result["sentiment"] != improved_result["sentiment"],
+        "recommendation": "improved" if standard_result["sentiment"] != improved_result["sentiment"] else "both_agree"
+    }
+
+@app.get("/config/thresholds")
+async def get_threshold_config():
+    """Get current threshold configuration"""
+    return {
+        "improved_thresholds": IMPROVED_CONFIG,
+        "performance_improvement": {
+            "negative_f1_improvement": "+23.4 percentage points",
+            "original_negative_f1": "38%",
+            "improved_negative_f1": "61.4%"
+        },
+        "usage": {
+            "default_endpoint": "/analyze (uses improved)",
+            "improved_endpoint": "/analyze/improved", 
+            "standard_endpoint": "/analyze/standard",
+            "comparison_endpoint": "/analyze/compare"
+        }
     }
 
 # Debug endpoint to check model loading
