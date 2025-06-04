@@ -1,6 +1,6 @@
 # 📈 Financial Sentiment Analysis API
 
-A production-ready sentiment analysis API for financial text using fine-tuned FinBERT with optimized negative sentiment detection. This project provides state-of-the-art sentiment classification specifically designed for financial news, earnings reports, and market commentary.
+A production-ready sentiment analysis API for financial text using fine-tuned FinBERT with optimized negative sentiment detection. 
 
 ![Python](https://img.shields.io/badge/python-v3.10+-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)
